@@ -20,6 +20,9 @@
  *    - Bugfix: Ungewollte 3 Byte padding am Ende der CM_SET_KEY.REQ entfernt
  *    - Bugfix: CM_SET_KEY.REQ.NID: statt fix mit "xxxxxx" zu befüllen, nehmen wir
  *        laut ISO das CM_SLAC_MATCH.CNF.NID.
+ *   2022-02-01 Uwe
+ *    - Feature: Tasteneinlesen vorbereitet.
+ *    - Verbesserung: Saubere Dekodierung der MMTYPE
  * 
  * 
  * 
@@ -79,6 +82,8 @@
 #include<stdbool.h>
 #include<sys/socket.h>
 #include<sys/types.h>
+#include <sys/select.h>
+#include <termios.h>
 
 #include<linux/if_packet.h>
 #include<netinet/in.h>		 
@@ -101,6 +106,57 @@
 
 #include "plc_homeplug.h" /* all types and definitions related to homeplug/etc */
 
+
+/***************************************************************
+ * Terminal handling
+ * */
+struct termios orig_termios;
+
+void reset_terminal_mode()
+{
+    tcsetattr(0, TCSANOW, &orig_termios);
+}
+
+void set_conio_terminal_mode()
+{
+    struct termios new_termios;
+
+    /* take two copies - one for now, one for later */
+    tcgetattr(0, &orig_termios);
+    memcpy(&new_termios, &orig_termios, sizeof(new_termios));
+
+    /* register cleanup handler, and set the new terminal mode */
+    atexit(reset_terminal_mode);
+    //cfmakeraw(&new_termios);
+  new_termios.c_lflag &= ~ICANON;
+  new_termios.c_lflag &= ~ECHO;
+  new_termios.c_lflag &= ~ISIG;
+  new_termios.c_cc[VMIN] = 0;
+  new_termios.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSANOW, &new_termios);
+}
+
+int kbhit()
+{
+    struct timeval tv = { 0L, 0L };
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    return select(1, &fds, NULL, NULL, &tv) > 0;
+}
+
+int getch()
+{
+    int r;
+    unsigned char c;
+    if ((r = read(0, &c, sizeof(c))) < 0) {
+        return r;
+    } else {
+        return c;
+    }
+} 
+
+/*********************************************************************/
 
 FILE* log_txt;
 int total,nHomePlug,icmp,igmp,other,iphdrlen;
@@ -235,48 +291,60 @@ void processHomeplugFrame(void) {
 	printf("processing Homeplug frame ");
 	struct homeplug_hdr *hph = (struct homeplug_hdr*)(receivebuffer+sizeof(struct ethhdr));
 	uint16_t mmtype = hph->MMTYPE;
-	switch (mmtype) { /* lower two bits defining the REQ/CNF/IND/RSP */
-	  case CM_SLAC_PARAM + MMTYPE_REQ:
-	    printf("CM_SLAC_PARAM.REQ\n");
+	uint8_t mmSubType = mmtype & 3;/* lower two bits defining the REQ/CNF/IND/RSP */
+	char strSubType[10];
+	char strMainType[50];
+	switch (mmSubType) {
+		case MMTYPE_REQ:
+			sprintf(strSubType, "REQ");
+			break;
+		case MMTYPE_CNF:
+			sprintf(strSubType, "CNF");
+			break;
+		case MMTYPE_IND:
+			sprintf(strSubType, "IND");
+			break;
+		case MMTYPE_RSP:
+			sprintf(strSubType, "RSP");
+			break;
+		default:
+			sprintf(strSubType, "???");
+	}
+	switch (mmtype & 0xfffc) { /* upper 14 bits */
+	  case CM_SLAC_PARAM:
+	    sprintf(strMainType, "CM_SLAC_PARAM");
 	    break;
-	  case CM_SLAC_PARAM + MMTYPE_CNF:
-	    printf("CM_SLAC_PARAM.CNF\n");
+	  case CM_MNBC_SOUND:
+	    sprintf(strMainType, "CM_MNBC_SOUND");
 	    break;
-	  case CM_MNBC_SOUND + MMTYPE_IND:
-	    printf("CM_MNBC_SOUND.IND\n");
-	    break;
-	  case CM_START_ATTEN_CHAR + MMTYPE_IND:
-	    printf("CM_START_ATTEN_CHAR.IND\n");
+	  case CM_START_ATTEN_CHAR:
+	    sprintf(strMainType, "CM_START_ATTEN_CHAR");
 	    break;	    
-	  case CM_ATTEN_CHAR + MMTYPE_IND:
-	    printf("CM_ATTEN_CHAR.IND\n");
+	  case CM_ATTEN_CHAR:
+	    sprintf(strMainType, "CM_ATTEN_CHAR");
 	    break;
-	  case CM_ATTEN_CHAR + MMTYPE_RSP:
-	    printf("CM_ATTEN_CHAR.RSP\n");
+	  case CM_SLAC_MATCH:
+	    sprintf(strMainType, "CM_SLAC_MATCH");
 	    break;
-	  case CM_SLAC_MATCH + MMTYPE_REQ:
-	    printf("CM_SLAC_MATCH.REQ\n");
+	  case CM_GET_DEVICE_SW_VERSION:
+	    sprintf(strMainType, "CM_GET_DEVICE_SW_VERSION");
 	    break;
-	  
-	  case CM_GET_DEVICE_SW_VERSION + MMTYPE_REQ:
-	    printf("CM_GET_DEVICE_SW_VERSION.REQ\n");
-	    nHpGetSwVersion++;
-	    sendSetKeyRequest(); /* just for testing */
+	  case CM_SET_KEY:
+	    sprintf(strMainType, "CM_SET_KEY");
 	    break;
+	  default:
+	    sprintf(strMainType, "MMTYPE %4x\n", mmtype);
+	}
+	printf("%s.%s\n", strMainType, strSubType);
+	switch (mmtype) { /* For reaction, we need to check the full 16 bit mmtype */    
 	  case CM_SLAC_MATCH + MMTYPE_CNF:
 	     /* This is the interesting point: Take the NID and NMK from SLAC_MATCH confirmation message,
 	      * and create a SET_KEY with this NID and NMK. */
-	    printf("CM_SLAC_MATCH.CNF\n");
 	    nHpSlacMatchCnf++;
 	    extractNmkFromMatchResponse();
 	    extractNidFromMatchResponse();
 	    sendSetKeyRequest();
 	    break;
-	  case CM_SET_KEY + MMTYPE_CNF:
-	    printf("CM_SET_KEY.CNF\n");
-	    break;
-	  default:
-		printf("MMTYPE = %4x\n", mmtype);
 	}	
 	  
 }
@@ -328,10 +396,10 @@ int initializeTheSocket(void) {
 
 int main()
 {
-
-	int saddr_len,buflen;
-
-	memset(receivebuffer,0,RECEIVE_BUFFER_SIZE);
+  unsigned char c=0;
+  int saddr_len,buflen;
+  int blExit=0;
+  memset(receivebuffer,0,RECEIVE_BUFFER_SIZE);
 
 	log_txt=fopen("log.txt","w");
 	if(!log_txt)
@@ -341,13 +409,15 @@ int main()
 
 	}
 	printTheNMK();
-	printf("starting .... \n");
+	printf("starting. Press x to exit.\n");
+	
 	if (initializeTheSocket()<0) {
 		return -1;
 	}
 
-	while(1)
-	{
+	set_conio_terminal_mode(); /* to react on each key press */
+    while (!blExit) {
+
 		nMainLoops++;
 		struct pollfd pollfd =
 	    {
@@ -381,6 +451,14 @@ int main()
 			printf("mainloops %5d, nPollSuccess %5d, nHomePlug: %5d,  Other: %5d  Total: %5d  SlacMatchCnf: %5d  GetSwVersion: %5d  SetKey: %5d\n",
 			nMainLoops, nPollSuccess, nHomePlug, other,total, nHpSlacMatchCnf, nHpGetSwVersion, nSetKey);
 		}
+	    if (kbhit()) {
+			/* A key was pressed */
+		    c=getch();
+		    printf("Taste gedrückt: %02x %c\n", c, c);
+		    if (c=='x') blExit=1;
+		    if (c==27) blExit=1; /* ESC */		  
+		    if (c==3) blExit=1; /* Ctrl C */		  
+ 	    }		
 
 	}
 
