@@ -333,6 +333,43 @@ typedef struct __packed cm_set_key_confirm
 	}
 	cm_set_key_confirm;
 
+
+/* according to HomeplugAV2.1 spec table 11-89 */
+#define HOMEPLUG_KEYTYPE_NMK 1 /* AES-128 */
+
+typedef struct __packed cm_get_key_request
+	{   /* structure according to homeplugAV2.1 specification */
+		struct ethhdr ethernet;
+		struct homeplug_fmi homeplug;
+		uint8_t RequestType; /* 0=direct */
+		uint8_t RequestedKeyType; /* only "NMK" is permitted over the H1 interface */
+		uint8_t NID [SLAC_NID_LEN];
+		uint32_t MYNOUNCE;
+		uint8_t PID;
+		uint16_t PRN;
+		uint8_t PMN;
+		/*uint8_t HASHKEY [...];*/ /* variable length, only applicable for hash keys */
+	}
+	cm_get_key_request;
+
+typedef struct __packed cm_get_key_confirm
+	{   /* structure according to homeplugAV2.1 specification */
+		struct ethhdr ethernet;
+		struct homeplug_fmi homeplug;
+		uint8_t RESULT;
+		uint8_t RequestedKeyType;
+		uint32_t MYNOUNCE;
+		uint32_t YOURNOUNCE;
+		uint8_t NID [SLAC_NID_LEN];
+		uint8_t EKS;
+		uint8_t PID;
+		uint16_t PRN;
+		uint8_t PMN;
+		uint8_t KEY [16]; /* variable length */
+	}
+	cm_get_key_confirm;
+
+
 #ifndef __GNUC__
 #pragma pack (push, 1)
 #endif
